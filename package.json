@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-softone",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "n8n community node for interacting with the SoftOne ERP JSON API.",
   "keywords": [
     "n8n-community-node-package",
