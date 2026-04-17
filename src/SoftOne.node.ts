@@ -13,7 +13,9 @@ import {
 } from 'n8n-workflow';
 import type { NodeConnectionType } from 'n8n-workflow';
 
+// ---------- SQL preset catalogue ----------
 const SQL_PRESETS: { name: string; value: string; description: string }[] = [
+    { name: 'Custom…', value: '__custom__', description: 'Enter any SqlName manually' },
     { name: 'Countries (Tari)', value: 'Tari', description: 'List countries' },
     { name: 'Zones / Counties (Judete)', value: 'Judete', description: 'List zones / counties' },
     { name: 'Currencies (Monede)', value: 'Monede', description: 'List currencies' },
@@ -36,21 +38,22 @@ const SQL_PRESETS: { name: string; value: string; description: string }[] = [
     { name: 'Transporters (transportatori)', value: 'transportatori', description: 'List transporters' },
     { name: 'Customs / SAFT Tax (safttaxsql)', value: 'safttaxsql', description: 'Customs / SAFT tax data' },
     { name: 'UIT Code (getuitcode1)', value: 'getuitcode1', description: 'Fetch UIT code for a document' },
-    { name: 'Custom…', value: '__custom__', description: 'Enter any SqlName manually' },
 ];
 
 const OBJECT_PRESETS: { name: string; value: string; description: string }[] = [
-    { name: 'Product Category (MTRCATEGORY)', value: 'MTRCATEGORY', description: 'Product category master data' },
-    { name: 'Manufacturer (MTRMANFCTR)', value: 'MTRMANFCTR', description: 'Manufacturer master data' },
-    { name: 'Item / Product (ITEM)', value: 'ITEM', description: 'Product / service master data' },
+    { name: 'Custom…', value: '__custom__', description: 'Enter any SoftOne OBJECT manually' },
     { name: 'Customer (CUSTOMER)', value: 'CUSTOMER', description: 'Customer master data' },
     { name: 'Supplier (SUPPLIER)', value: 'SUPPLIER', description: 'Supplier master data' },
+    { name: 'Item / Product (ITEM)', value: 'ITEM', description: 'Product / service master data' },
+    { name: 'Product Category (MTRCATEGORY)', value: 'MTRCATEGORY', description: 'Product category master data' },
+    { name: 'Manufacturer (MTRMANFCTR)', value: 'MTRMANFCTR', description: 'Manufacturer master data' },
     { name: 'Person (PRSN)', value: 'PRSN', description: 'User / person record' },
     { name: 'Sales Document (FINDOC)', value: 'FINDOC', description: 'Invoice / receipt / sale doc' },
-    { name: 'Purchase Document (MTRDOC)', value: 'MTRDOC', description: 'NIR / purchase doc' },
-    { name: 'Custom…', value: '__custom__', description: 'Enter any SoftOne OBJECT manually' },
+    { name: 'Purchase Document (PURDOC)', value: 'PURDOC', description: 'Purchase doc' },
+    { name: 'Material Document (MTRDOC)', value: 'MTRDOC', description: 'NIR / material doc' },
 ];
 
+// ---------- Credential shape ----------
 interface SoftOneCredentials {
     host: string;
     username: string;
@@ -61,6 +64,44 @@ interface SoftOneCredentials {
     allowUnsafeHost?: boolean;
 }
 
+// ---------- Error codes ----------
+const S1_ERROR_CODES: Record<string, string> = {
+    '-101': 'Session expired (web account time expiration). Re-authenticate.',
+    '-100': 'Session expired (deep-linking smart command).',
+    '-12': 'Invalid web service call.',
+    '-11': 'License must include a "Web Service Connector" module.',
+    '-10': 'Login fails — username contains illegal characters.',
+    '-9': 'Invalid request. Ensure your request is valid.',
+    '-8': 'User account is not active.',
+    '-7': 'Session expired (FinalDate on web account).',
+    '-6': 'Invalid AppId — the AppId in the request does not match the one in the clientID.',
+    '-5': 'Web-service licences exceeded.',
+    '-4': 'Number of registered devices exceeded.',
+    '-3': 'Access denied — selected module not activated.',
+    '-2': 'Authenticate failed — invalid credentials.',
+    '-1': 'Invalid request — please login first.',
+    '11': 'Internal server error.',
+    '12': 'Deprecated service.',
+    '13': 'Invalid request — reqID expired.',
+    '14': 'Invalid WS request — check SerialNumber.',
+    '101': 'Insufficient access rights. Check module or web-account user licences.',
+    '102': 'reqID not found on server.',
+    '213': 'Invalid request — reqID expired.',
+    '1001': 'Ensure username, password, user-is-active, and administrator right.',
+    '2001': 'Data does not exist.',
+};
+
+function decorateS1Error(response: IDataObject): string {
+    const code = response.errorcode ?? response.code;
+    const raw = typeof response.error === 'string' ? response.error : 'unknown';
+    if (code !== undefined) {
+        const hint = S1_ERROR_CODES[String(code)];
+        return hint ? `${raw} [${code}: ${hint}]` : `${raw} [code ${code}]`;
+    }
+    return raw;
+}
+
+// ---------- Security helpers ----------
 const SENSITIVE_KEYS = new Set([
     'password', 'Password', 'PASSWORD',
     'username', 'Username', 'USERNAME',
@@ -166,24 +207,18 @@ function validateHost(host: string, allowUnsafe: boolean): URL {
 
 function sanitizeEndpointPath(raw: string): string {
     const trimmed = (raw ?? '').trim();
-    if (!trimmed) {
-        throw new Error('Endpoint Path is required.');
-    }
-    if (!trimmed.startsWith('/')) {
-        throw new Error('Endpoint Path must start with "/".');
-    }
-    if (trimmed.includes('?') || trimmed.includes('#')) {
+    if (!trimmed) throw new Error('Endpoint Path is required.');
+    if (!trimmed.startsWith('/')) throw new Error('Endpoint Path must start with "/".');
+    if (trimmed.includes('?') || trimmed.includes('#'))
         throw new Error('Endpoint Path must not contain query string or fragment.');
-    }
-    if (!/^[A-Za-z0-9/_.\-]+$/.test(trimmed)) {
+    if (!/^[A-Za-z0-9/_.\-]+$/.test(trimmed))
         throw new Error('Endpoint Path contains unsupported characters. Allowed: letters, digits, "/", "_", ".", "-".');
-    }
-    if (trimmed.split('/').some((seg) => seg === '..')) {
+    if (trimmed.split('/').some((seg) => seg === '..'))
         throw new Error('Endpoint Path must not contain ".." segments.');
-    }
     return trimmed;
 }
 
+// ---------- Filter builder ----------
 interface FilterRow {
     field?: string;
     operator?: string;
@@ -249,6 +284,7 @@ function buildFormDataWithClientId(raw: string, clientID: string): string {
     return stripped.length > 0 ? `${injected}&${stripped}` : injected;
 }
 
+// ---------- Session ----------
 interface SoftOneCompany {
     COMPANY: string;
     BRANCH: string;
@@ -277,10 +313,9 @@ interface Session {
     clientID: string;
     appid: string;
     company: SoftOneCompany;
-    login: LoginResponse;
-    auth: AuthenticateResponse;
 }
 
+// ---------- HTTP ----------
 async function callJson(
     ctx: IExecuteFunctions,
     creds: SoftOneCredentials,
@@ -301,13 +336,59 @@ async function callJson(
     if (isSuccessFalse(response)) {
         const safe = redactSecrets(response) as JsonObject;
         throw new NodeApiError(ctx.getNode(), safe, {
-            message: `SoftOne API error: ${(response as IDataObject).error ?? 'unknown'}`,
+            message: `SoftOne API error: ${decorateS1Error(response)}`,
             itemIndex,
         });
     }
     return response ?? {};
 }
 
+async function callText(
+    ctx: IExecuteFunctions,
+    creds: SoftOneCredentials,
+    body: IDataObject,
+): Promise<string> {
+    const url = validateHost(creds.host, Boolean(creds.allowUnsafeHost));
+    const response = await ctx.helpers.httpRequest.call(ctx, {
+        method: 'POST',
+        url: url.toString().replace(/\/$/, ''),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        encoding: 'text',
+        timeout: 90000,
+        disableFollowRedirect: true,
+        skipSslCertificateValidation: false,
+    });
+    return typeof response === 'string' ? response : String(response);
+}
+
+async function callRawPost(
+    ctx: IExecuteFunctions,
+    url: string,
+    postData: string,
+    asBinary: boolean,
+): Promise<Buffer | string> {
+    const response = await ctx.helpers.httpRequest.call(ctx, {
+        method: 'POST',
+        url,
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'cache-control': 'no-cache',
+        },
+        body: postData,
+        encoding: asBinary ? 'arraybuffer' : 'text',
+        returnFullResponse: false,
+        timeout: 30000,
+        disableFollowRedirect: true,
+        skipSslCertificateValidation: false,
+    });
+    if (asBinary) {
+        return Buffer.isBuffer(response) ? response : Buffer.from(response as ArrayBuffer);
+    }
+    return typeof response === 'string' ? response : String(response);
+}
+
+// ---------- Auth flow ----------
 async function loginOnce(
     ctx: IExecuteFunctions,
     creds: SoftOneCredentials,
@@ -319,9 +400,7 @@ async function loginOnce(
         password: creds.password,
         appId: creds.appId,
     };
-    if (creds.loginDate) {
-        body.LOGINDATE = creds.loginDate;
-    }
+    if (creds.loginDate) body.LOGINDATE = creds.loginDate;
     return (await callJson(ctx, creds, body, itemIndex)) as LoginResponse;
 }
 
@@ -360,7 +439,7 @@ async function authenticateOnce(
 ): Promise<AuthenticateResponse> {
     const body: IDataObject = {
         service: 'authenticate',
-        clientId: login.clientID,
+        clientID: login.clientID,
         COMPANY: company.COMPANY,
         BRANCH: company.BRANCH,
         MODULE: company.MODULE,
@@ -388,13 +467,12 @@ async function getSession(
         clientID: String(auth.clientID ?? ''),
         appid: String(login.appid ?? ''),
         company,
-        login,
-        auth,
     };
     cache.set(cacheKey, session);
     return session;
 }
 
+// ---------- Misc helpers ----------
 function parseJsonParam(
     ctx: IExecuteFunctions,
     raw: string,
@@ -418,32 +496,28 @@ function parseJsonParam(
     }
 }
 
-async function callRawPost(
-    ctx: IExecuteFunctions,
-    url: string,
-    postData: string,
-    asBinary: boolean,
-): Promise<Buffer | string> {
-    const response = await ctx.helpers.httpRequest.call(ctx, {
-        method: 'POST',
-        url,
-        headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'cache-control': 'no-cache',
-        },
-        body: postData,
-        encoding: asBinary ? 'arraybuffer' : 'text',
-        returnFullResponse: false,
-        timeout: 30000,
-        disableFollowRedirect: true,
-        skipSslCertificateValidation: false,
-    });
-    if (asBinary) {
-        return Buffer.isBuffer(response) ? response : Buffer.from(response as ArrayBuffer);
+function normalizeRows(response: IDataObject): IDataObject[] {
+    const rows = response.rows;
+    if (!Array.isArray(rows) || rows.length === 0) return [];
+    const fields = Array.isArray(response.fields) ? (response.fields as IDataObject[]) : [];
+    // SqlData returns row objects directly; getBrowserInfo returns arrays aligned with fields[].name
+    if (typeof rows[0] === 'object' && !Array.isArray(rows[0])) {
+        return rows as IDataObject[];
     }
-    return typeof response === 'string' ? response : String(response);
+    if (fields.length === 0) {
+        return rows.map((r, i) => ({ [`col_${i}`]: r })) as IDataObject[];
+    }
+    const fieldNames = fields.map((f) => String(f.name ?? ''));
+    return (rows as unknown[][]).map((row) => {
+        const obj: IDataObject = {};
+        for (let i = 0; i < fieldNames.length; i++) {
+            obj[fieldNames[i] || `col_${i}`] = row[i] as IDataObject[string];
+        }
+        return obj;
+    });
 }
 
+// ---------- Node ----------
 export class SoftOne implements INodeType {
     description: INodeTypeDescription = {
         displayName: 'SoftOne',
@@ -453,17 +527,11 @@ export class SoftOne implements INodeType {
         version: 1,
         subtitle: '={{$parameter["operation"] + ": " + $parameter["resource"]}}',
         description: 'Interact with the SoftOne ERP JSON API',
-        defaults: {
-            name: 'SoftOne',
-        },
+        defaults: { name: 'SoftOne' },
         inputs: ['main' as NodeConnectionType],
         outputs: ['main' as NodeConnectionType],
         credentials: [
-            {
-                name: 'softOneApi',
-                required: true,
-                testedBy: 'softOneApiTest',
-            },
+            { name: 'softOneApi', required: true, testedBy: 'softOneApiTest' },
         ],
         properties: [
             {
@@ -474,12 +542,14 @@ export class SoftOne implements INodeType {
                 options: [
                     { name: 'SQL Data', value: 'sqlData' },
                     { name: 'Object', value: 'object' },
+                    { name: 'Metadata', value: 'metadata' },
+                    { name: 'Report', value: 'report' },
                     { name: 'Custom Endpoint', value: 'endpoint' },
                 ],
                 default: 'sqlData',
             },
 
-            // -------- SQL Data operations --------
+            // ---------- SQL Data ----------
             {
                 displayName: 'Operation',
                 name: 'operation',
@@ -502,8 +572,8 @@ export class SoftOne implements INodeType {
                 type: 'options',
                 displayOptions: { show: { resource: ['sqlData'], operation: ['runNamedSql'] } },
                 options: SQL_PRESETS,
-                default: 'Tari',
-                description: 'Known SoftOne SQL names. Pick "Custom…" to enter a different name.',
+                default: '__custom__',
+                description: 'Pick a known SQL name or "Custom…" to enter a different value.',
             },
             {
                 displayName: 'Custom SQL Name',
@@ -511,20 +581,15 @@ export class SoftOne implements INodeType {
                 type: 'string',
                 default: '',
                 displayOptions: {
-                    show: {
-                        resource: ['sqlData'],
-                        operation: ['runNamedSql'],
-                        sqlPreset: ['__custom__'],
-                    },
+                    show: { resource: ['sqlData'], operation: ['runNamedSql'], sqlPreset: ['__custom__'] },
                 },
-                description: 'SoftOne SqlName (e.g. scadentec).',
+                description: 'SoftOne SqlName.',
             },
             {
                 displayName: 'Param 1',
                 name: 'param1',
                 type: 'string',
                 default: '',
-                description: 'Optional param1 passed to the SQL. See preset description.',
                 displayOptions: { show: { resource: ['sqlData'], operation: ['runNamedSql'] } },
             },
             {
@@ -532,7 +597,6 @@ export class SoftOne implements INodeType {
                 name: 'param2',
                 type: 'string',
                 default: '',
-                description: 'Optional param2 passed to the SQL.',
                 displayOptions: { show: { resource: ['sqlData'], operation: ['runNamedSql'] } },
             },
             {
@@ -540,7 +604,6 @@ export class SoftOne implements INodeType {
                 name: 'param3',
                 type: 'string',
                 default: '',
-                description: 'Optional param3 passed to the SQL.',
                 displayOptions: { show: { resource: ['sqlData'], operation: ['runNamedSql'] } },
             },
             {
@@ -548,11 +611,11 @@ export class SoftOne implements INodeType {
                 name: 'splitRows',
                 type: 'boolean',
                 default: true,
-                description: 'Whether to emit one n8n item per row returned by SoftOne. If off, emits a single item with the full response.',
+                description: 'Emit one item per row returned. Off = single item with full response.',
                 displayOptions: { show: { resource: ['sqlData'], operation: ['runNamedSql'] } },
             },
 
-            // -------- Object operations --------
+            // ---------- Object ----------
             {
                 displayName: 'Operation',
                 name: 'operation',
@@ -560,10 +623,13 @@ export class SoftOne implements INodeType {
                 noDataExpression: true,
                 displayOptions: { show: { resource: ['object'] } },
                 options: [
-                    { name: 'Get by Key', value: 'getByKey', action: 'Get an object by its primary key' },
-                    { name: 'List', value: 'list', action: 'List objects via getBrowserInfo' },
-                    { name: 'Create', value: 'create', action: 'Create an object via setData' },
-                    { name: 'Update', value: 'update', action: 'Update an object via setData' },
+                    { name: 'Get by Key', value: 'getByKey', action: 'Get one record by primary key' },
+                    { name: 'List', value: 'list', action: 'List records via getBrowserInfo' },
+                    { name: 'List Next Page', value: 'listNext', action: 'Paginate a previous List via reqID' },
+                    { name: 'Create', value: 'create', action: 'Create a record (setData)' },
+                    { name: 'Update', value: 'update', action: 'Update a record (setData)' },
+                    { name: 'Delete', value: 'delete', action: 'Delete a record (delData)' },
+                    { name: 'Calculate', value: 'calculate', action: 'Dry-run setData; returns computed values without persisting' },
                 ],
                 default: 'getByKey',
             },
@@ -571,20 +637,19 @@ export class SoftOne implements INodeType {
                 displayName: 'Object Type',
                 name: 'objectType',
                 type: 'options',
-                displayOptions: { show: { resource: ['object'] } },
+                displayOptions: {
+                    show: { resource: ['object'], operation: ['getByKey', 'list', 'create', 'update', 'delete', 'calculate'] },
+                },
                 options: OBJECT_PRESETS,
                 default: 'CUSTOMER',
-                description: 'SoftOne OBJECT name. Pick "Custom…" to enter a different value.',
+                description: 'SoftOne OBJECT name.',
             },
             {
                 displayName: 'Custom Object Name',
                 name: 'objectNameCustom',
                 type: 'string',
                 default: '',
-                displayOptions: {
-                    show: { resource: ['object'], objectType: ['__custom__'] },
-                },
-                description: 'SoftOne OBJECT value (e.g. MTRL).',
+                displayOptions: { show: { resource: ['object'], objectType: ['__custom__'] } },
             },
             {
                 displayName: 'Key',
@@ -592,11 +657,36 @@ export class SoftOne implements INodeType {
                 type: 'string',
                 default: '',
                 required: true,
-                displayOptions: {
-                    show: { resource: ['object'], operation: ['getByKey', 'update'] },
-                },
-                description: 'Primary key of the object.',
+                displayOptions: { show: { resource: ['object'], operation: ['getByKey', 'update', 'delete'] } },
+                description: 'Primary key of the record.',
             },
+            {
+                displayName: 'Key',
+                name: 'key',
+                type: 'string',
+                default: '',
+                displayOptions: { show: { resource: ['object'], operation: ['calculate'] } },
+                description: 'Optional primary key. Omit when calculating fields for a new record.',
+            },
+            {
+                displayName: 'LOCATEINFO',
+                name: 'locateInfo',
+                type: 'string',
+                default: '',
+                placeholder: 'CUSTOMER:CODE,NAME,AFM;CUSEXTRA:VARCHAR02,DATE01',
+                description: 'Optional. Comma-separated field list per table. Limits the returned payload to the named fields.',
+                displayOptions: { show: { resource: ['object'], operation: ['getByKey', 'create', 'update', 'calculate'] } },
+            },
+            {
+                displayName: 'Form',
+                name: 'form',
+                type: 'string',
+                default: '',
+                description: 'Optional SoftOne FORM identifier — only needed when the object has multiple forms.',
+                displayOptions: { show: { resource: ['object'], operation: ['getByKey', 'list'] } },
+            },
+
+            // List-specific
             {
                 displayName: 'Filter Mode',
                 name: 'filterMode',
@@ -606,7 +696,6 @@ export class SoftOne implements INodeType {
                     { name: 'Raw', value: 'raw' },
                 ],
                 default: 'builder',
-                description: 'Builder: compose conditions field-by-field. Raw: hand-write the FILTERS string.',
                 displayOptions: { show: { resource: ['object'], operation: ['list'] } },
             },
             {
@@ -616,23 +705,14 @@ export class SoftOne implements INodeType {
                 typeOptions: { multipleValues: true, sortable: true },
                 default: {},
                 placeholder: 'Add Condition',
-                description: 'Each condition is AND-joined. Use multiple rows for AND; use "In List (OR)" for OR inside a field.',
-                displayOptions: {
-                    show: { resource: ['object'], operation: ['list'], filterMode: ['builder'] },
-                },
+                description: 'Each condition is AND-joined.',
+                displayOptions: { show: { resource: ['object'], operation: ['list'], filterMode: ['builder'] } },
                 options: [
                     {
                         name: 'conditions',
                         displayName: 'Condition',
                         values: [
-                            {
-                                displayName: 'Field',
-                                name: 'field',
-                                type: 'string',
-                                default: '',
-                                placeholder: 'CUSTOMER.NAME',
-                                description: 'SoftOne field in TABLE.FIELD form.',
-                            },
+                            { displayName: 'Field', name: 'field', type: 'string', default: '', placeholder: 'CUSTOMER.NAME' },
                             {
                                 displayName: 'Operator',
                                 name: 'operator',
@@ -654,25 +734,11 @@ export class SoftOne implements INodeType {
                                 name: 'value',
                                 type: 'string',
                                 default: '',
-                                description: 'For "In List (OR)" separate values with | (pipe). "&", "=", "|" inside the value are URL-encoded automatically.',
-                                displayOptions: {
-                                    hide: { operator: ['range', 'isTrue', 'isFalse'] },
-                                },
+                                description: 'For "In List (OR)" separate values with | (pipe). "&", "=", "|" are URL-encoded automatically.',
+                                displayOptions: { hide: { operator: ['range', 'isTrue', 'isFalse'] } },
                             },
-                            {
-                                displayName: 'From',
-                                name: 'valueFrom',
-                                type: 'string',
-                                default: '',
-                                displayOptions: { show: { operator: ['range'] } },
-                            },
-                            {
-                                displayName: 'To',
-                                name: 'valueTo',
-                                type: 'string',
-                                default: '',
-                                displayOptions: { show: { operator: ['range'] } },
-                            },
+                            { displayName: 'From', name: 'valueFrom', type: 'string', default: '', displayOptions: { show: { operator: ['range'] } } },
+                            { displayName: 'To', name: 'valueTo', type: 'string', default: '', displayOptions: { show: { operator: ['range'] } } },
                         ],
                     },
                 ],
@@ -682,37 +748,246 @@ export class SoftOne implements INodeType {
                 name: 'filters',
                 type: 'string',
                 default: '',
-                description: 'Raw SoftOne FILTERS expression (e.g. "MTRL.SODTYPE=51&MTRL.CODE=ABC123").',
-                displayOptions: {
-                    show: { resource: ['object'], operation: ['list'], filterMode: ['raw'] },
-                },
+                displayOptions: { show: { resource: ['object'], operation: ['list'], filterMode: ['raw'] } },
+            },
+            {
+                displayName: 'Limit',
+                name: 'limit',
+                type: 'number',
+                default: 200,
+                description: 'Rows per page.',
+                displayOptions: { show: { resource: ['object'], operation: ['list', 'listNext'] } },
+            },
+            {
+                displayName: 'Fetch All',
+                name: 'fetchAll',
+                type: 'boolean',
+                default: false,
+                description: 'Loop getBrowserData until every row up to Max Rows is fetched.',
+                displayOptions: { show: { resource: ['object'], operation: ['list'] } },
+            },
+            {
+                displayName: 'Max Rows',
+                name: 'maxRows',
+                type: 'number',
+                default: 10000,
+                description: 'Hard ceiling when Fetch All is on.',
+                displayOptions: { show: { resource: ['object'], operation: ['list'], fetchAll: [true] } },
+            },
+            {
+                displayName: 'Split Rows',
+                name: 'splitRows',
+                type: 'boolean',
+                default: true,
+                description: 'Emit one item per row. Off = single item with {rows, reqID, totalcount, fields, columns}.',
+                displayOptions: { show: { resource: ['object'], operation: ['list', 'listNext'] } },
+            },
+            {
+                displayName: 'Request ID',
+                name: 'reqID',
+                type: 'string',
+                default: '',
+                required: true,
+                description: 'reqID returned by a previous List call (when Split Rows was off).',
+                displayOptions: { show: { resource: ['object'], operation: ['listNext'] } },
             },
             {
                 displayName: 'Start',
                 name: 'start',
                 type: 'number',
                 default: 0,
-                displayOptions: { show: { resource: ['object'], operation: ['list'] } },
+                description: 'Zero-based row offset.',
+                displayOptions: { show: { resource: ['object'], operation: ['listNext'] } },
             },
-            {
-                displayName: 'Limit',
-                name: 'limit',
-                type: 'number',
-                default: 20,
-                displayOptions: { show: { resource: ['object'], operation: ['list'] } },
-            },
+
+            // Create / Update / Calculate data
             {
                 displayName: 'Data (JSON)',
                 name: 'dataJson',
                 type: 'json',
                 default: '{}',
-                description: 'JSON body for setData. Top-level keys are SoftOne table names (e.g. {"MTRL": {...}, "MTRMANFCTR": {...}}).',
-                displayOptions: {
-                    show: { resource: ['object'], operation: ['create', 'update'] },
-                },
+                description: 'Nested SoftOne payload, e.g. {"CUSTOMER":[{"CODE":"100","NAME":"Acme"}], "CUSEXTRA":[{"VARCHAR01":"foo"}]}.',
+                displayOptions: { show: { resource: ['object'], operation: ['create', 'update', 'calculate'] } },
+            },
+            {
+                displayName: 'Return Saved Data',
+                name: 'returnSaved',
+                type: 'boolean',
+                default: false,
+                description: 'Send VERSION:2 so the response includes the saved record (subject to LOCATEINFO if set).',
+                displayOptions: { show: { resource: ['object'], operation: ['create', 'update'] } },
             },
 
-            // -------- Custom Endpoint operations --------
+            // ---------- Metadata ----------
+            {
+                displayName: 'Operation',
+                name: 'operation',
+                type: 'options',
+                noDataExpression: true,
+                displayOptions: { show: { resource: ['metadata'] } },
+                options: [
+                    { name: 'List Objects', value: 'listObjects', action: 'List all business objects (getObjects)' },
+                    { name: 'List Object Tables', value: 'listObjectTables', action: 'List tables of an object (getObjectTables)' },
+                    { name: 'List Table Fields', value: 'listTableFields', action: 'List fields of a table (getTableFields)' },
+                    { name: 'Get Form Design', value: 'getFormDesign', action: 'Get tables + fields with presentation format' },
+                    { name: 'Get Dialog', value: 'getDialog', action: 'Get dialog/browser fields with presentation format' },
+                    { name: 'Selector Lookup', value: 'selectorLookup', action: 'getSelectorData — filtered editor lookups' },
+                    { name: 'Fields by Key', value: 'fieldsByKey', action: 'selectorFields — named fields by primary key' },
+                ],
+                default: 'listObjects',
+            },
+            {
+                displayName: 'Object Name',
+                name: 'metaObject',
+                type: 'string',
+                default: 'CUSTOMER',
+                placeholder: 'CUSTOMER',
+                required: true,
+                displayOptions: {
+                    show: {
+                        resource: ['metadata'],
+                        operation: ['listObjectTables', 'listTableFields', 'getFormDesign', 'getDialog'],
+                    },
+                },
+            },
+            {
+                displayName: 'Table Name',
+                name: 'metaTable',
+                type: 'string',
+                default: '',
+                required: true,
+                placeholder: 'CUSTOMER',
+                description: 'Specific table name (from List Object Tables).',
+                displayOptions: { show: { resource: ['metadata'], operation: ['listTableFields'] } },
+            },
+            {
+                displayName: 'Form',
+                name: 'metaForm',
+                type: 'string',
+                default: '',
+                displayOptions: { show: { resource: ['metadata'], operation: ['getFormDesign'] } },
+            },
+            {
+                displayName: 'List',
+                name: 'metaList',
+                type: 'string',
+                default: '',
+                description: 'Optional LIST identifier for dialogs.',
+                displayOptions: { show: { resource: ['metadata'], operation: ['getDialog'] } },
+            },
+            {
+                displayName: 'EDITOR',
+                name: 'selectorEditor',
+                type: 'string',
+                default: '',
+                required: true,
+                placeholder: "1|TRDR|TRDR|SODTYPE=13 AND ISPROSP='0'|",
+                description: 'Editor spec string from SoftOne.',
+                displayOptions: { show: { resource: ['metadata'], operation: ['selectorLookup'] } },
+            },
+            {
+                displayName: 'Value',
+                name: 'selectorValue',
+                type: 'string',
+                default: '',
+                required: true,
+                displayOptions: { show: { resource: ['metadata'], operation: ['selectorLookup'] } },
+            },
+            {
+                displayName: 'Table Name',
+                name: 'sfTable',
+                type: 'string',
+                default: 'CUSTOMER',
+                required: true,
+                displayOptions: { show: { resource: ['metadata'], operation: ['fieldsByKey'] } },
+            },
+            {
+                displayName: 'Key Name',
+                name: 'sfKeyName',
+                type: 'string',
+                default: 'TRDR',
+                required: true,
+                displayOptions: { show: { resource: ['metadata'], operation: ['fieldsByKey'] } },
+            },
+            {
+                displayName: 'Key Value',
+                name: 'sfKeyValue',
+                type: 'string',
+                default: '',
+                required: true,
+                displayOptions: { show: { resource: ['metadata'], operation: ['fieldsByKey'] } },
+            },
+            {
+                displayName: 'Result Fields',
+                name: 'sfResultFields',
+                type: 'string',
+                default: 'CODE,NAME',
+                description: 'Comma-separated field list.',
+                required: true,
+                displayOptions: { show: { resource: ['metadata'], operation: ['fieldsByKey'] } },
+            },
+
+            // ---------- Report ----------
+            {
+                displayName: 'Operation',
+                name: 'operation',
+                type: 'options',
+                noDataExpression: true,
+                displayOptions: { show: { resource: ['report'] } },
+                options: [
+                    { name: 'Run Report', value: 'runReport', action: 'Run a SoftOne report and fetch HTML pages' },
+                ],
+                default: 'runReport',
+            },
+            {
+                displayName: 'Report Object',
+                name: 'reportObject',
+                type: 'string',
+                default: '',
+                required: true,
+                placeholder: 'CUST_ADDR_BOOK',
+                displayOptions: { show: { resource: ['report'], operation: ['runReport'] } },
+            },
+            {
+                displayName: 'List',
+                name: 'reportList',
+                type: 'string',
+                default: '',
+                displayOptions: { show: { resource: ['report'], operation: ['runReport'] } },
+            },
+            {
+                displayName: 'Filters',
+                name: 'reportFilters',
+                type: 'string',
+                default: '',
+                description: 'Raw SoftOne FILTERS expression.',
+                displayOptions: { show: { resource: ['report'], operation: ['runReport'] } },
+            },
+            {
+                displayName: 'Fetch All Pages',
+                name: 'reportFetchAll',
+                type: 'boolean',
+                default: true,
+                description: 'When on, fetch every page of the report.',
+                displayOptions: { show: { resource: ['report'], operation: ['runReport'] } },
+            },
+            {
+                displayName: 'Page Number',
+                name: 'reportPage',
+                type: 'number',
+                default: 1,
+                displayOptions: { show: { resource: ['report'], operation: ['runReport'], reportFetchAll: [false] } },
+            },
+            {
+                displayName: 'Split Pages',
+                name: 'reportSplitPages',
+                type: 'boolean',
+                default: true,
+                description: 'Emit one item per page. Off = concatenate into one HTML blob.',
+                displayOptions: { show: { resource: ['report'], operation: ['runReport'], reportFetchAll: [true] } },
+            },
+
+            // ---------- Custom Endpoint ----------
             {
                 displayName: 'Operation',
                 name: 'operation',
@@ -724,8 +999,6 @@ export class SoftOne implements INodeType {
                         name: 'POST Form',
                         value: 'postForm',
                         action: 'POST a form-encoded body to a custom SoftOne endpoint',
-                        description:
-                            'Send a form-encoded body to a server-side job endpoint configured on the SoftOne instance. The authenticated clientID is auto-injected.',
                     },
                 ],
                 default: 'postForm',
@@ -737,8 +1010,6 @@ export class SoftOne implements INodeType {
                 default: '',
                 required: true,
                 placeholder: '/JS/custom/MyJob',
-                description:
-                    'Absolute path on the SoftOne host (must start with "/"). No query strings, no ".." segments.',
                 displayOptions: { show: { resource: ['endpoint'] } },
             },
             {
@@ -747,8 +1018,7 @@ export class SoftOne implements INodeType {
                 type: 'string',
                 default: '',
                 placeholder: 'FINDOC.FINDOC=12345',
-                description:
-                    'URL-encoded body sent to the endpoint. Do not include clientID — the node injects it from the authenticated session.',
+                description: 'Do not include clientID — the node injects it.',
                 displayOptions: { show: { resource: ['endpoint'] } },
             },
             {
@@ -760,7 +1030,6 @@ export class SoftOne implements INodeType {
                     { name: 'Text', value: 'text' },
                 ],
                 default: 'binary',
-                description: 'How to interpret the response body.',
                 displayOptions: { show: { resource: ['endpoint'] } },
             },
             {
@@ -768,7 +1037,6 @@ export class SoftOne implements INodeType {
                 name: 'binaryProperty',
                 type: 'string',
                 default: 'data',
-                description: 'Name of the binary property on the output item.',
                 displayOptions: { show: { resource: ['endpoint'], responseType: ['binary'] } },
             },
             {
@@ -776,7 +1044,6 @@ export class SoftOne implements INodeType {
                 name: 'fileName',
                 type: 'string',
                 default: 'softone-response',
-                description: 'File name for the returned binary. Path separators and ".." segments are stripped.',
                 displayOptions: { show: { resource: ['endpoint'], responseType: ['binary'] } },
             },
             {
@@ -784,7 +1051,6 @@ export class SoftOne implements INodeType {
                 name: 'mimeType',
                 type: 'string',
                 default: 'application/octet-stream',
-                placeholder: 'application/pdf',
                 displayOptions: { show: { resource: ['endpoint'], responseType: ['binary'] } },
             },
         ],
@@ -827,7 +1093,10 @@ export class SoftOne implements INodeType {
                     return { status: 'Error', message: `Login request failed: ${(e as Error).message}` };
                 }
                 if (isSuccessFalse(loginRes)) {
-                    return { status: 'Error', message: `Login failed: ${loginRes.error ?? 'unknown'}` };
+                    return {
+                        status: 'Error',
+                        message: `Login failed: ${decorateS1Error(loginRes as unknown as IDataObject)}`,
+                    };
                 }
                 const companies = loginRes.objs ?? [];
                 if (companies.length === 0) {
@@ -846,7 +1115,7 @@ export class SoftOne implements INodeType {
 
                 const authBody: IDataObject = {
                     service: 'authenticate',
-                    clientId: loginRes.clientID,
+                    clientID: loginRes.clientID,
                     COMPANY: company.COMPANY,
                     BRANCH: company.BRANCH,
                     MODULE: company.MODULE,
@@ -867,13 +1136,13 @@ export class SoftOne implements INodeType {
                     return { status: 'Error', message: `Authenticate request failed: ${(e as Error).message}` };
                 }
                 if (isSuccessFalse(authRes)) {
-                    return { status: 'Error', message: `Authenticate failed: ${authRes.error ?? 'unknown'}` };
+                    return {
+                        status: 'Error',
+                        message: `Authenticate failed: ${decorateS1Error(authRes as unknown as IDataObject)}`,
+                    };
                 }
 
-                return {
-                    status: 'OK',
-                    message: `Authenticated into company ${company.COMPANY}.`,
-                };
+                return { status: 'OK', message: `Authenticated into company ${company.COMPANY}.` };
             },
         },
     };
@@ -884,22 +1153,31 @@ export class SoftOne implements INodeType {
         const creds = (await this.getCredentials('softOneApi')) as unknown as SoftOneCredentials;
         const sessionCache = new Map<string, Session>();
 
+        const resolveObjectName = (i: number): string => {
+            const t = this.getNodeParameter('objectType', i) as string;
+            const name = t === '__custom__'
+                ? (this.getNodeParameter('objectNameCustom', i) as string).trim()
+                : t;
+            if (!name) {
+                throw new NodeOperationError(this.getNode(), 'Object name is required.', { itemIndex: i });
+            }
+            return name;
+        };
+
         for (let i = 0; i < items.length; i++) {
             try {
                 const resource = this.getNodeParameter('resource', i) as string;
                 const operation = this.getNodeParameter('operation', i) as string;
 
+                // ---------- SQL Data ----------
                 if (resource === 'sqlData' && operation === 'runNamedSql') {
                     const session = await getSession(this, creds, sessionCache, i);
                     const preset = this.getNodeParameter('sqlPreset', i) as string;
-                    const sqlName =
-                        preset === '__custom__'
-                            ? (this.getNodeParameter('sqlNameCustom', i) as string).trim()
-                            : preset;
+                    const sqlName = preset === '__custom__'
+                        ? (this.getNodeParameter('sqlNameCustom', i) as string).trim()
+                        : preset;
                     if (!sqlName) {
-                        throw new NodeOperationError(this.getNode(), 'SQL name is required.', {
-                            itemIndex: i,
-                        });
+                        throw new NodeOperationError(this.getNode(), 'SQL name is required.', { itemIndex: i });
                     }
                     const param1 = this.getNodeParameter('param1', i, '') as string;
                     const param2 = this.getNodeParameter('param2', i, '') as string;
@@ -908,7 +1186,7 @@ export class SoftOne implements INodeType {
 
                     const body: IDataObject = {
                         service: 'SqlData',
-                        clientId: session.clientID,
+                        clientID: session.clientID,
                         appId: session.appid,
                         SqlName: sqlName,
                     };
@@ -917,10 +1195,7 @@ export class SoftOne implements INodeType {
                     if (param3) body.param3 = param3;
 
                     const response = await callJson(this, creds, body, i);
-                    const rows = Array.isArray((response as IDataObject).rows)
-                        ? ((response as IDataObject).rows as IDataObject[])
-                        : [];
-
+                    const rows = normalizeRows(response);
                     if (splitRows && rows.length > 0) {
                         for (const row of rows) returnData.push({ json: row });
                     } else {
@@ -929,33 +1204,30 @@ export class SoftOne implements INodeType {
                     continue;
                 }
 
+                // ---------- Object ----------
                 if (resource === 'object') {
                     const session = await getSession(this, creds, sessionCache, i);
-                    const objectType = this.getNodeParameter('objectType', i) as string;
-                    const objectName =
-                        objectType === '__custom__'
-                            ? (this.getNodeParameter('objectNameCustom', i) as string).trim()
-                            : objectType;
-                    if (!objectName) {
-                        throw new NodeOperationError(this.getNode(), 'Object name is required.', {
-                            itemIndex: i,
-                        });
-                    }
 
                     if (operation === 'getByKey') {
+                        const objectName = resolveObjectName(i);
                         const key = this.getNodeParameter('key', i) as string;
+                        const locateInfo = (this.getNodeParameter('locateInfo', i, '') as string).trim();
+                        const form = (this.getNodeParameter('form', i, '') as string).trim();
                         const body: IDataObject = {
                             service: 'getData',
-                            clientId: session.clientID,
+                            clientID: session.clientID,
                             appId: session.appid,
                             OBJECT: objectName,
                             KEY: key,
                         };
+                        if (locateInfo) body.LOCATEINFO = locateInfo;
+                        if (form) body.FORM = form;
                         returnData.push({ json: await callJson(this, creds, body, i) });
                         continue;
                     }
 
                     if (operation === 'list') {
+                        const objectName = resolveObjectName(i);
                         const filterMode = this.getNodeParameter('filterMode', i, 'builder') as string;
                         let filters: string;
                         if (filterMode === 'builder') {
@@ -965,34 +1237,112 @@ export class SoftOne implements INodeType {
                             try {
                                 filters = compileFilters(builder.conditions ?? []);
                             } catch (e) {
-                                throw new NodeOperationError(this.getNode(), (e as Error).message, {
-                                    itemIndex: i,
-                                });
+                                throw new NodeOperationError(this.getNode(), (e as Error).message, { itemIndex: i });
                             }
                         } else {
                             filters = this.getNodeParameter('filters', i, '') as string;
                         }
-                        const start = this.getNodeParameter('start', i, 0) as number;
-                        const limit = this.getNodeParameter('limit', i, 20) as number;
-                        const body: IDataObject = {
+                        const limit = this.getNodeParameter('limit', i, 200) as number;
+                        const form = (this.getNodeParameter('form', i, '') as string).trim();
+                        const fetchAll = this.getNodeParameter('fetchAll', i, false) as boolean;
+                        const maxRows = this.getNodeParameter('maxRows', i, 10000) as number;
+                        const splitRows = this.getNodeParameter('splitRows', i, true) as boolean;
+
+                        const infoBody: IDataObject = {
                             service: 'getBrowserInfo',
-                            clientId: session.clientID,
+                            clientID: session.clientID,
                             appId: session.appid,
                             OBJECT: objectName,
+                            VERSION: 2,
+                            LIMIT: limit,
                             FILTERS: filters,
+                        };
+                        if (form) infoBody.FORM = form;
+
+                        const infoRes = await callJson(this, creds, infoBody, i);
+                        const rows = normalizeRows(infoRes);
+                        const reqID = String(infoRes.reqID ?? '');
+                        const totalcount = Number(infoRes.totalcount ?? rows.length);
+
+                        let collected: IDataObject[] = rows.slice();
+                        if (fetchAll && reqID && totalcount > collected.length) {
+                            const cap = Math.min(totalcount, maxRows);
+                            while (collected.length < cap) {
+                                const dataBody: IDataObject = {
+                                    service: 'getBrowserData',
+                                    clientID: session.clientID,
+                                    appId: session.appid,
+                                    reqID,
+                                    START: collected.length,
+                                    LIMIT: limit,
+                                };
+                                const dataRes = await callJson(this, creds, dataBody, i);
+                                const pageRows = normalizeRows({
+                                    ...dataRes,
+                                    fields: infoRes.fields,
+                                });
+                                if (pageRows.length === 0) break;
+                                collected = collected.concat(pageRows);
+                                if (pageRows.length < limit) break;
+                            }
+                            if (collected.length > maxRows) collected = collected.slice(0, maxRows);
+                        }
+
+                        if (splitRows) {
+                            for (const row of collected) returnData.push({ json: row });
+                        } else {
+                            returnData.push({
+                                json: {
+                                    rows: collected,
+                                    reqID,
+                                    totalcount,
+                                    fields: infoRes.fields ?? null,
+                                    columns: infoRes.columns ?? null,
+                                    fetchedAll: fetchAll,
+                                } as IDataObject,
+                            });
+                        }
+                        continue;
+                    }
+
+                    if (operation === 'listNext') {
+                        const reqID = this.getNodeParameter('reqID', i) as string;
+                        const start = this.getNodeParameter('start', i, 0) as number;
+                        const limit = this.getNodeParameter('limit', i, 200) as number;
+                        const splitRows = this.getNodeParameter('splitRows', i, true) as boolean;
+                        const body: IDataObject = {
+                            service: 'getBrowserData',
+                            clientID: session.clientID,
+                            appId: session.appid,
+                            reqID,
                             START: start,
                             LIMIT: limit,
                         };
-                        returnData.push({ json: await callJson(this, creds, body, i) });
+                        const response = await callJson(this, creds, body, i);
+                        const rows = normalizeRows(response);
+                        if (splitRows && rows.length > 0) {
+                            for (const row of rows) returnData.push({ json: row });
+                        } else {
+                            returnData.push({
+                                json: {
+                                    rows,
+                                    reqID,
+                                    totalcount: Number(response.totalcount ?? rows.length),
+                                } as IDataObject,
+                            });
+                        }
                         continue;
                     }
 
                     if (operation === 'create' || operation === 'update') {
+                        const objectName = resolveObjectName(i);
                         const rawData = this.getNodeParameter('dataJson', i, '{}') as string;
                         const data = parseJsonParam(this, rawData, 'Data (JSON)', i);
+                        const locateInfo = (this.getNodeParameter('locateInfo', i, '') as string).trim();
+                        const returnSaved = this.getNodeParameter('returnSaved', i, false) as boolean;
                         const body: IDataObject = {
                             service: 'setData',
-                            clientId: session.clientID,
+                            clientID: session.clientID,
                             appId: session.appid,
                             OBJECT: objectName,
                             data,
@@ -1000,11 +1350,209 @@ export class SoftOne implements INodeType {
                         if (operation === 'update') {
                             body.KEY = this.getNodeParameter('key', i) as string;
                         }
+                        if (returnSaved) body.VERSION = 2;
+                        if (locateInfo) body.LOCATEINFO = locateInfo;
+                        returnData.push({ json: await callJson(this, creds, body, i) });
+                        continue;
+                    }
+
+                    if (operation === 'delete') {
+                        const objectName = resolveObjectName(i);
+                        const key = this.getNodeParameter('key', i) as string;
+                        const body: IDataObject = {
+                            service: 'delData',
+                            clientID: session.clientID,
+                            appId: session.appid,
+                            OBJECT: objectName,
+                            KEY: key,
+                        };
+                        returnData.push({ json: await callJson(this, creds, body, i) });
+                        continue;
+                    }
+
+                    if (operation === 'calculate') {
+                        const objectName = resolveObjectName(i);
+                        const key = (this.getNodeParameter('key', i, '') as string).trim();
+                        const rawData = this.getNodeParameter('dataJson', i, '{}') as string;
+                        const data = parseJsonParam(this, rawData, 'Data (JSON)', i);
+                        const locateInfo = (this.getNodeParameter('locateInfo', i, '') as string).trim();
+                        const body: IDataObject = {
+                            service: 'calculate',
+                            clientID: session.clientID,
+                            appId: session.appid,
+                            OBJECT: objectName,
+                            data,
+                        };
+                        if (key) body.KEY = key;
+                        if (locateInfo) body.LOCATEINFO = locateInfo;
                         returnData.push({ json: await callJson(this, creds, body, i) });
                         continue;
                     }
                 }
 
+                // ---------- Metadata ----------
+                if (resource === 'metadata') {
+                    const session = await getSession(this, creds, sessionCache, i);
+                    const base: IDataObject = {
+                        clientID: session.clientID,
+                        appId: session.appid,
+                    };
+
+                    if (operation === 'listObjects') {
+                        const response = await callJson(this, creds, { ...base, service: 'getObjects' }, i);
+                        returnData.push({ json: response });
+                        continue;
+                    }
+                    if (operation === 'listObjectTables') {
+                        const objectName = this.getNodeParameter('metaObject', i) as string;
+                        const response = await callJson(this, creds, {
+                            ...base,
+                            service: 'getObjectTables',
+                            OBJECT: objectName,
+                        }, i);
+                        returnData.push({ json: response });
+                        continue;
+                    }
+                    if (operation === 'listTableFields') {
+                        const objectName = this.getNodeParameter('metaObject', i) as string;
+                        const tableName = this.getNodeParameter('metaTable', i) as string;
+                        const response = await callJson(this, creds, {
+                            ...base,
+                            service: 'getTableFields',
+                            OBJECT: objectName,
+                            TABLE: tableName,
+                        }, i);
+                        returnData.push({ json: response });
+                        continue;
+                    }
+                    if (operation === 'getFormDesign') {
+                        const objectName = this.getNodeParameter('metaObject', i) as string;
+                        const form = (this.getNodeParameter('metaForm', i, '') as string).trim();
+                        const response = await callJson(this, creds, {
+                            ...base,
+                            service: 'getFormDesign',
+                            OBJECT: objectName,
+                            FORM: form,
+                        }, i);
+                        returnData.push({ json: response });
+                        continue;
+                    }
+                    if (operation === 'getDialog') {
+                        const objectName = this.getNodeParameter('metaObject', i) as string;
+                        const list = (this.getNodeParameter('metaList', i, '') as string).trim();
+                        const response = await callJson(this, creds, {
+                            ...base,
+                            service: 'getDialog',
+                            OBJECT: objectName,
+                            LIST: list,
+                        }, i);
+                        returnData.push({ json: response });
+                        continue;
+                    }
+                    if (operation === 'selectorLookup') {
+                        const editor = this.getNodeParameter('selectorEditor', i) as string;
+                        const value = this.getNodeParameter('selectorValue', i) as string;
+                        // getSelectorData returns a bare array, not an object with success/rows
+                        const body: IDataObject = {
+                            ...base,
+                            service: 'getSelectorData',
+                            EDITOR: editor,
+                            VALUE: value,
+                        };
+                        const url = validateHost(creds.host, Boolean(creds.allowUnsafeHost));
+                        const raw = await this.helpers.httpRequest.call(this, {
+                            method: 'POST',
+                            url: url.toString().replace(/\/$/, ''),
+                            body,
+                            json: true,
+                            timeout: 90000,
+                            disableFollowRedirect: true,
+                            skipSslCertificateValidation: false,
+                        });
+                        returnData.push({ json: { rows: raw } });
+                        continue;
+                    }
+                    if (operation === 'fieldsByKey') {
+                        const table = this.getNodeParameter('sfTable', i) as string;
+                        const keyName = this.getNodeParameter('sfKeyName', i) as string;
+                        const keyValue = this.getNodeParameter('sfKeyValue', i) as string;
+                        const resultFields = this.getNodeParameter('sfResultFields', i) as string;
+                        const response = await callJson(this, creds, {
+                            ...base,
+                            service: 'selectorFields',
+                            TABLENAME: table,
+                            KEYNAME: keyName,
+                            KEYVALUE: keyValue,
+                            RESULTFIELDS: resultFields,
+                        }, i);
+                        returnData.push({ json: response });
+                        continue;
+                    }
+                }
+
+                // ---------- Report ----------
+                if (resource === 'report' && operation === 'runReport') {
+                    const session = await getSession(this, creds, sessionCache, i);
+                    const reportObject = this.getNodeParameter('reportObject', i) as string;
+                    const list = (this.getNodeParameter('reportList', i, '') as string).trim();
+                    const filters = (this.getNodeParameter('reportFilters', i, '') as string).trim();
+                    const fetchAll = this.getNodeParameter('reportFetchAll', i, true) as boolean;
+
+                    const infoBody: IDataObject = {
+                        service: 'getReportInfo',
+                        clientID: session.clientID,
+                        appId: session.appid,
+                        OBJECT: reportObject,
+                        LIST: list,
+                        FILTERS: filters,
+                    };
+                    const infoRes = await callJson(this, creds, infoBody, i);
+                    const reqID = String(infoRes.reqID ?? '');
+                    const npages = Number(infoRes.npages ?? 1);
+
+                    if (!reqID) {
+                        throw new NodeOperationError(this.getNode(), 'Report returned no reqID.', { itemIndex: i });
+                    }
+
+                    const fetchPage = async (pageNum: number): Promise<string> => {
+                        return callText(this, creds, {
+                            service: 'getReportData',
+                            clientID: session.clientID,
+                            appId: session.appid,
+                            reqID,
+                            PAGENUM: pageNum,
+                        });
+                    };
+
+                    if (!fetchAll) {
+                        const pageNum = this.getNodeParameter('reportPage', i, 1) as number;
+                        const html = await fetchPage(pageNum);
+                        returnData.push({
+                            json: { reqID, pageNum, npages, html } as IDataObject,
+                        });
+                        continue;
+                    }
+
+                    const splitPages = this.getNodeParameter('reportSplitPages', i, true) as boolean;
+                    const pages: string[] = [];
+                    for (let p = 1; p <= npages; p++) {
+                        pages.push(await fetchPage(p));
+                    }
+                    if (splitPages) {
+                        for (let p = 0; p < pages.length; p++) {
+                            returnData.push({
+                                json: { reqID, pageNum: p + 1, npages, html: pages[p] } as IDataObject,
+                            });
+                        }
+                    } else {
+                        returnData.push({
+                            json: { reqID, npages, html: pages.join('\n') } as IDataObject,
+                        });
+                    }
+                    continue;
+                }
+
+                // ---------- Custom Endpoint ----------
                 if (resource === 'endpoint' && operation === 'postForm') {
                     const url = validateHost(creds.host, Boolean(creds.allowUnsafeHost));
                     const host = url.toString().replace(/\/$/, '');
@@ -1012,9 +1560,7 @@ export class SoftOne implements INodeType {
                     try {
                         path = sanitizeEndpointPath(this.getNodeParameter('endpointPath', i) as string);
                     } catch (e) {
-                        throw new NodeOperationError(this.getNode(), (e as Error).message, {
-                            itemIndex: i,
-                        });
+                        throw new NodeOperationError(this.getNode(), (e as Error).message, { itemIndex: i });
                     }
                     const rawFormData = (this.getNodeParameter('formData', i, '') as string).trim();
                     const session = await getSession(this, creds, sessionCache, i);
