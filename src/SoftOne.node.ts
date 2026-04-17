@@ -184,6 +184,62 @@ function sanitizeEndpointPath(raw: string): string {
     return trimmed;
 }
 
+interface FilterRow {
+    field?: string;
+    operator?: string;
+    value?: string;
+    valueFrom?: string;
+    valueTo?: string;
+}
+
+function encodeFilterValue(v: string): string {
+    return v.replace(/&/g, '%26').replace(/=/g, '%3D').replace(/\|/g, '%7C');
+}
+
+function compileFilters(rows: FilterRow[]): string {
+    const parts: string[] = [];
+    for (const r of rows) {
+        const field = (r.field ?? '').trim();
+        if (!field) continue;
+        const op = r.operator ?? 'equals';
+        const v = r.value ?? '';
+        let clause: string;
+        switch (op) {
+            case 'equals':
+                clause = `${field}=${encodeFilterValue(v)}`;
+                break;
+            case 'contains':
+                clause = `${field}=%${encodeFilterValue(v)}%`;
+                break;
+            case 'startsWith':
+                clause = `${field}=${encodeFilterValue(v)}%`;
+                break;
+            case 'endsWith':
+                clause = `${field}=%${encodeFilterValue(v)}`;
+                break;
+            case 'range':
+                clause = `${field}=${encodeFilterValue(r.valueFrom ?? '')}...${encodeFilterValue(r.valueTo ?? '')}`;
+                break;
+            case 'inList': {
+                const values = v.split('|').map((s) => s.trim()).filter(Boolean);
+                if (values.length === 0) continue;
+                clause = `${field}=${values.map(encodeFilterValue).join('|')}`;
+                break;
+            }
+            case 'isTrue':
+                clause = `${field}=1`;
+                break;
+            case 'isFalse':
+                clause = `${field}=0`;
+                break;
+            default:
+                throw new Error(`Unknown filter operator: ${op}`);
+        }
+        parts.push(clause);
+    }
+    return parts.join('&');
+}
+
 function buildFormDataWithClientId(raw: string, clientID: string): string {
     const stripped = (raw ?? '')
         .split('&')
@@ -542,12 +598,94 @@ export class SoftOne implements INodeType {
                 description: 'Primary key of the object.',
             },
             {
+                displayName: 'Filter Mode',
+                name: 'filterMode',
+                type: 'options',
+                options: [
+                    { name: 'Builder', value: 'builder' },
+                    { name: 'Raw', value: 'raw' },
+                ],
+                default: 'builder',
+                description: 'Builder: compose conditions field-by-field. Raw: hand-write the FILTERS string.',
+                displayOptions: { show: { resource: ['object'], operation: ['list'] } },
+            },
+            {
                 displayName: 'Filters',
+                name: 'filtersBuilder',
+                type: 'fixedCollection',
+                typeOptions: { multipleValues: true, sortable: true },
+                default: {},
+                placeholder: 'Add Condition',
+                description: 'Each condition is AND-joined. Use multiple rows for AND; use "In List (OR)" for OR inside a field.',
+                displayOptions: {
+                    show: { resource: ['object'], operation: ['list'], filterMode: ['builder'] },
+                },
+                options: [
+                    {
+                        name: 'conditions',
+                        displayName: 'Condition',
+                        values: [
+                            {
+                                displayName: 'Field',
+                                name: 'field',
+                                type: 'string',
+                                default: '',
+                                placeholder: 'CUSTOMER.NAME',
+                                description: 'SoftOne field in TABLE.FIELD form.',
+                            },
+                            {
+                                displayName: 'Operator',
+                                name: 'operator',
+                                type: 'options',
+                                options: [
+                                    { name: 'Equals', value: 'equals' },
+                                    { name: 'Contains', value: 'contains' },
+                                    { name: 'Starts With', value: 'startsWith' },
+                                    { name: 'Ends With', value: 'endsWith' },
+                                    { name: 'Range (Between)', value: 'range' },
+                                    { name: 'In List (OR)', value: 'inList' },
+                                    { name: 'Is True', value: 'isTrue' },
+                                    { name: 'Is False', value: 'isFalse' },
+                                ],
+                                default: 'equals',
+                            },
+                            {
+                                displayName: 'Value',
+                                name: 'value',
+                                type: 'string',
+                                default: '',
+                                description: 'For "In List (OR)" separate values with | (pipe). "&", "=", "|" inside the value are URL-encoded automatically.',
+                                displayOptions: {
+                                    hide: { operator: ['range', 'isTrue', 'isFalse'] },
+                                },
+                            },
+                            {
+                                displayName: 'From',
+                                name: 'valueFrom',
+                                type: 'string',
+                                default: '',
+                                displayOptions: { show: { operator: ['range'] } },
+                            },
+                            {
+                                displayName: 'To',
+                                name: 'valueTo',
+                                type: 'string',
+                                default: '',
+                                displayOptions: { show: { operator: ['range'] } },
+                            },
+                        ],
+                    },
+                ],
+            },
+            {
+                displayName: 'Raw FILTERS',
                 name: 'filters',
                 type: 'string',
                 default: '',
                 description: 'Raw SoftOne FILTERS expression (e.g. "MTRL.SODTYPE=51&MTRL.CODE=ABC123").',
-                displayOptions: { show: { resource: ['object'], operation: ['list'] } },
+                displayOptions: {
+                    show: { resource: ['object'], operation: ['list'], filterMode: ['raw'] },
+                },
             },
             {
                 displayName: 'Start',
@@ -818,7 +956,22 @@ export class SoftOne implements INodeType {
                     }
 
                     if (operation === 'list') {
-                        const filters = this.getNodeParameter('filters', i, '') as string;
+                        const filterMode = this.getNodeParameter('filterMode', i, 'builder') as string;
+                        let filters: string;
+                        if (filterMode === 'builder') {
+                            const builder = this.getNodeParameter('filtersBuilder', i, {}) as {
+                                conditions?: FilterRow[];
+                            };
+                            try {
+                                filters = compileFilters(builder.conditions ?? []);
+                            } catch (e) {
+                                throw new NodeOperationError(this.getNode(), (e as Error).message, {
+                                    itemIndex: i,
+                                });
+                            }
+                        } else {
+                            filters = this.getNodeParameter('filters', i, '') as string;
+                        }
                         const start = this.getNodeParameter('start', i, 0) as number;
                         const limit = this.getNodeParameter('limit', i, 20) as number;
                         const body: IDataObject = {
