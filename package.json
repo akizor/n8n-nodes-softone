@@ -1,0 +1,52 @@
+{
+  "name": "n8n-nodes-softone",
+  "version": "1.0.0",
+  "description": "n8n community node for interacting with the SoftOne ERP JSON API.",
+  "keywords": [
+    "n8n-community-node-package",
+    "n8n",
+    "softone",
+    "s1",
+    "erp"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/akizor/n8n-nodes-softone#readme",
+  "author": {
+    "name": "Daniel P"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/akizor/n8n-nodes-softone.git"
+  },
+  "engines": {
+    "node": ">=18.10",
+    "pnpm": ">=9.1"
+  },
+  "packageManager": "pnpm@9.1.4",
+  "main": "nodes/SoftOne.node.js",
+  "scripts": {
+    "build": "tsc && cp src/softOne.svg nodes/softOne.svg",
+    "dev": "tsc --watch"
+  },
+  "files": [
+    "nodes"
+  ],
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "nodes/SoftOneApi.credentials.js"
+    ],
+    "nodes": [
+      "nodes/SoftOne.node.js"
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.13",
+    "n8n-workflow": "^1.82.0",
+    "typescript": "^5.0.0"
+  },
+  "peerDependencies": {
+    "n8n-workflow": "*"
+  },
+  "dependencies": {}
+}
